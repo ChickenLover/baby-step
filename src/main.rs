@@ -1,116 +1,63 @@
-use std::collections::HashMap;
-use std::env;
+extern crate rug;
+extern crate rayon;
+extern crate indicatif;
 
-fn print_help() {
-    println!("cargo run <order> <generator> <input>");
-    println!("- order:     the (prime) order n of the cyclic group");
-    println!("- generator: a generator for the group");
-    println!("- input:     the number we want the discrete logarithm of");
-    println!("Example: cargo run 31 3 6");
+use rayon::prelude::*;
+
+use rug::{Integer, Complete, ops::{MulFrom, RemFrom, DivRounding}};
+use std::{collections::HashMap};
+use indicatif::{ProgressIterator, ParallelProgressIterator};
+
+struct BigNumRange<'a> {
+    curr: Integer,
+    end: &'a Integer
 }
 
-// Efficient computation of the modular exponentiation by chaining.
-//
-// Instead of computing (base ^ exp) mod n, we compute
-//   ((base ^ 2 mod n) ^ 2 mod n) ...
-// until the product of all exponents is equal to the original exponent.
-// When the exponent is not a power of 2, we multiply by the base as many
-// times as necessary to make it become one.
-//
-// For instance
-//   base ^ 25 mod n = (base * base^24) mod n = (base * base^8 * base^16) mod n.
-fn modular_exponentiation(base: u32, exp: u32, n: u32) -> u32 {
-    if base == 0 {
-        return 0;
-    }
+impl<'a> Iterator for BigNumRange<'a> { 
+    type Item = Integer;
 
-    let mut intermediate = 1;
-    let mut b = base;
-    let mut e = exp;
-
-    while e != 0 {
-        if e % 2 != 0 {
-            intermediate = (intermediate * b) % n;
+    fn next(&mut self) -> Option<Self::Item> {
+        let current = self.curr.clone();
+        if current.lt(self.end) {
+            self.curr += 1;
+            Some(current)
+        } else {
+            None
         }
-        e /= 2;
-        b = (b * b) % n;
     }
-
-    return intermediate;
 }
 
-// The modular inverse is the number x such that base*x mod n = 1.
-// It does not always exist; it is only guaranteed to exist if the base
-// and n are coprimes. Here, this is already required by the setup of
-// the algorithm, so we assume it's true (we could do verification too).
-//
-//   base^tot(n) = 1 (tot(n) is Euler's totient function).
-//   base^(tot(n) - 1) = base^-1 mod n.
-//
-// When n is a prime, tot(n) = n-1, so
-//   base^(n-2) = base^-1 mod n.
-//
-// So we reuse the modular exponentiation algorithm. There are more
-// efficient methods too.
-fn modular_inverse(base: u32, n: u32) -> u32 {
-    return modular_exponentiation(base, n - 2, n);
-}
+fn baby_step_giant_step(n: Integer, alpha: Integer, beta: Integer, m: Integer) -> Result<Integer, &'static str> {
+    let iter = BigNumRange{ curr: Integer::ZERO, end: &m };
 
-fn baby_step_giant_step(n: u32, alpha: u32, beta: u32) -> Result<u32, &'static str> {
-    let m = (n as f64).sqrt().ceil() as u32;
-    let mut precomp = HashMap::new();
+    let precomp: HashMap<Integer, Integer> = iter.par_bridge().into_par_iter().progress_count(m.to_u64_wrapping()).map(|j| {
+        (Integer::from(alpha.pow_mod_ref(&Integer::from(&j), &n).unwrap()), j.clone())
+    }).collect();
+    println!("Finished calculating table!");
+    
+    let invgenerator = Integer::from(alpha.pow_mod_ref(&m, &n).unwrap()).invert(&n).unwrap();
+    let mut y: Integer = beta;
 
-    for j in 0..m {
-        precomp.insert(modular_exponentiation(alpha, j, n), j);
-    }
-
-    let invgenerator = modular_inverse(modular_exponentiation(alpha, m, n), n);
-    let mut y: u32 = beta;
-    let mut found = false;
-    let mut res: u32 = 0;
-
-    for i in 0..m {
+    let iter = BigNumRange{ curr: Integer::ZERO, end: &m };
+    for i in iter.progress_count(m.to_u64_wrapping()) {
         if precomp.contains_key(&y) {
-            match precomp.get(&y) {
-                Some(value) => res = (i * m) + value,
-                None => return Err("internal error"),
-            }
-
-            found = true;
-            break;
+            return precomp.get(&y).ok_or("Got error").map(|value| (i * m.clone()) + value);
         }
-
-        y = y * invgenerator % n;
+        
+        y.mul_from(&invgenerator);
+        y.rem_from(&n);
     }
-
-    if !found {
-        return Err("not found");
-    }
-
-    Ok(res)
+    Err("Not found :(")
 }
 
 fn main() {
-    let args: Vec<_> = env::args().collect();
+    let p = Integer::parse("21847359589888208475506724917162265063571401985325370367631361781114029653025956815157605328190411141044160689815741319381196532979871500038979862309158738250945118554961626824152307536605872616502884288878062467052777605227846709781850614792748458838951342204812601838112937805371782600380106020522884406452823818824455683982042882928183431194593189171431066371138510252979648513553078762584596147427456837289623008879364829477705183636149304120998948654278133874026711188494311770883514889363351380064520413459602696141353949407971810071848354127868725934057811052285511726070951954828625761984797831079801857828431").unwrap().complete();
+	let g = Integer::parse("21744646143243216057020228551156208752703942887207308868664445275548674736620508732925764357515199547303283870847514971207187185912917434889899462163342116463504651187567271577773370136574456671482796328194698430314464307239426297609039182878000113673163760381575629928593038563536234958563213385495445541911168414741250494418615704883548296728080545795859843320405072472266753448906714605637308642468422898558630812487636188819677130134963833040948411243908028200183454403067866539747291394732970142401544187137624428138444276721310399530477238861596789940953323090393313600101710523922727140772179016720953265564666").unwrap().complete();
+	let a = Integer::parse("6384201945364259416484618556230682430992417498764575739869190272523735481484018572812468821955378599176918034272111105002324791003253919162436622535453745408437647881572386470941971475251078850286304439754861599469147475492519769292883229128057869632295023589669156129147001420291798187153143127735238126939728677098865317467404967501011186234614072662215754693860629617912797573819290964731520795401609222935030001060869435851177399452933354698474411159337923418076284460501174419894324660021273635203791996633586742144073352269865971941687673123777993188268979508244658784407075950581524330447222535111673938658510").unwrap().complete();
 
-    if args.len() == 1 {
-        print_help();
-        return;
-    }
+    let m: Integer = Integer::from(1u64 << 51).sqrt_ref().complete() + 1;
 
-    if args.len() != 4 {
-        print_help();
-        panic!("Wrong number of command line arguments");
-    }
-
-    let n: u32 = args[1].parse::<u32>().unwrap();
-    let alpha: u32 = args[2].parse::<u32>().unwrap();
-    let beta: u32 = args[3].parse::<u32>().unwrap();
-
-    println!("Discrete logarithm through baby-step giant-step algorithm.\n");
-    println!("Computing x such that {}^x mod {} = {}", alpha, n, beta);
-
-    match baby_step_giant_step(n, alpha, beta) {
+    match baby_step_giant_step(p, g, a, m) {
         Result::Ok(value) => println!("Discrete logarithm is {}", value),
         Result::Err(_) => println!("Could not find discrete logarithm."),
     }
